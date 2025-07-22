@@ -1,5 +1,6 @@
 pyTelegramBotAPI==4.10.0
 Flask
+python-dotenv
 gunicorn
 requests
 pytz
