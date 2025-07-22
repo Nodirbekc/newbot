@@ -1,121 +1,159 @@
 import os
-import logging
 import requests
-import pytz
+import logging
 from datetime import datetime
 from flask import Flask, request
+import pytz
 from telebot import TeleBot, types
-from dotenv import load_dotenv
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 OWM_API_KEY = os.getenv("OWM_API")
+EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")  # добавь в Render
 
-if not BOT_TOKEN or not OWM_API_KEY:
-    raise Exception("BOT_TOKEN или OWM_API не задан в переменных окружения")
-
-bot = TeleBot(BOT_TOKEN)
+bot = TeleBot(TOKEN)
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-
 user_last_city = {}
 
-# Кнопка "Погода"
-def weather_button():
+logging.basicConfig(level=logging.INFO)
+
+# --- Кнопки ---
+def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn = types.KeyboardButton("🌤 Погода")
-    markup.add(btn)
+    markup.row(types.KeyboardButton("🌤 Погода"), types.KeyboardButton("💱 Курсы валют"))
     return markup
 
-# /start
+# --- Эмодзи по температуре ---
+def get_temp_emoji(temp):
+    if temp <= 0:
+        return "🥶"
+    elif temp >= 30:
+        return "🥵"
+    else:
+        return "😊"
+
+# --- Преобразование времени ---
+def format_time(timestamp, timezone_str):
+    tz = pytz.timezone(timezone_str)
+    dt = datetime.utcfromtimestamp(timestamp).replace(tzinfo=pytz.utc).astimezone(tz)
+    return dt.strftime('%H:%M')
+
+# --- Старт ---
 @bot.message_handler(commands=["start"])
 def start_handler(message):
-    bot.send_message(message.chat.id, "hillow hillow", reply_markup=weather_button())
+    bot.send_message(
+        message.chat.id,
+        "hillow hillow!\nВыберите действие:",
+        reply_markup=get_main_keyboard()
+    )
 
-# Обработка нажатий на кнопку
-@bot.message_handler(func=lambda m: m.text == "🌤 Погода")
+# --- Обработка кнопок ---
+@bot.message_handler(func=lambda msg: msg.text == "🌤 Погода")
 def ask_city(message):
-    bot.send_message(message.chat.id, "Информацию о погоде какого города или страны хотите узнать?")
+    bot.send_message(message.chat.id, "Введите город для прогноза погоды:")
 
-# Основная логика получения и вывода погоды
-@bot.message_handler(func=lambda m: True)
-def send_weather(message):
-    chat_id = message.chat.id
-    city = message.text.strip()
-    user_last_city[message.from_user.id] = city
+@bot.message_handler(func=lambda msg: msg.text == "💱 Курсы валют")
+def ask_currency_type(message):
+    bot.send_message(message.chat.id, "Введите валюту (например: USD, EUR, BTC):")
 
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OWM_API_KEY}&units=metric&lang=ru"
-    forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={OWM_API_KEY}&units=metric&lang=ru"
+# --- Погода ---
+def get_weather(city):
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OWM_API_KEY}&units=metric&lang=ru"
+    res = requests.get(url).json()
 
+    if res.get("cod") != 200:
+        return "Город не найден."
+
+    name = res["name"]
+    temp = res["main"]["temp"]
+    weather = res["weather"][0]["description"]
+    humidity = res["main"]["humidity"]
+    wind_speed = res["wind"]["speed"]
+    sunrise = res["sys"]["sunrise"]
+    sunset = res["sys"]["sunset"]
+    emoji = get_temp_emoji(temp)
+    timezone_offset = res["timezone"]
+    timezone_name = pytz.timezone("Asia/Tashkent")  # или по желанию
+
+    sunrise_local = format_time(sunrise, "Asia/Tashkent")
+    sunset_local = format_time(sunset, "Asia/Tashkent")
+
+    return (
+        f"📍 {name}\n"
+        f"🌡 Температура: {temp}°C {emoji}\n"
+        f"☁ Погода: {weather}\n"
+        f"💧 Влажность: {humidity}%\n"
+        f"💨 Ветер: {wind_speed} м/с\n"
+        f"🌅 Восход: {sunrise_local}\n"
+        f"🌇 Закат: {sunset_local}"
+    )
+
+# --- Курс валют ---
+def get_exchange(currency_code):
     try:
-        r = requests.get(url).json()
-        f = requests.get(forecast_url).json()
-
-        if r.get("cod") != 200:
-            bot.send_message(chat_id, "Не удалось найти город. Проверьте название.")
-            return
-
-        # Текущая погода
-        temp = r["main"]["temp"]
-        desc = r["weather"][0]["description"].capitalize()
-        humidity = r["main"]["humidity"]
-        wind = r["wind"]["speed"]
-        sunrise = datetime.utcfromtimestamp(r["sys"]["sunrise"]).strftime('%H:%M')
-        sunset = datetime.utcfromtimestamp(r["sys"]["sunset"]).strftime('%H:%M')
-
-        emoji = "🙂"
-        if temp <= 0:
-            emoji = "🥶"
-        elif temp >= 30:
-            emoji = "🥵"
-
-        msg = (
-            f"Погода в {city} сейчас:\n"
-            f"{emoji} {desc}\n"
-            f"🌡 Температура: {temp}°C\n"
-            f"💧 Влажность: {humidity}%\n"
-            f"🌬 Ветер: {wind} м/с\n"
-            f"🌅 Восход: {sunrise} UTC\n"
-            f"🌇 Закат: {sunset} UTC\n\n"
-            f"📅 Прогноз на ближайшие дни:\n"
+        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/latest/{currency_code.upper()}"
+        res = requests.get(url).json()
+        if res["result"] != "success":
+            return "Ошибка получения курса."
+        rates = res["conversion_rates"]
+        return (
+            f"💱 1 {currency_code.upper()}:\n"
+            f"🇺🇿 UZS: {rates['UZS']}\n"
+            f"🇷🇺 RUB: {rates['RUB']}\n"
+            f"🇰🇿 KZT: {rates['KZT']}\n"
+            f"🇺🇸 USD: {rates['USD']}\n"
+            f"🇪🇺 EUR: {rates['EUR']}"
         )
+    except:
+        return "Ошибка при получении данных."
 
-        # Прогноз на 3 дня (раз в 24 ч, 12:00)
-        days_added = set()
-        for item in f["list"]:
-            dt = datetime.utcfromtimestamp(item["dt"])
-            if dt.hour == 12 and dt.date() not in days_added:
-                day_str = dt.strftime("%d.%m")
-                temp_day = item["main"]["temp"]
-                description = item["weather"][0]["description"].capitalize()
-                pop = item.get("pop", 0)
-                chance = f"{int(pop * 100)}%"
-                msg += f"📆 {day_str}: {description}, {temp_day}°C, осадки: {chance}\n"
-                days_added.add(dt.date())
-                if len(days_added) >= 3:
-                    break
+# --- Обработка сообщений ---
+@bot.message_handler(func=lambda msg: True, content_types=["text"])
+def general_handler(message):
+    text = message.text.strip()
 
-        bot.send_message(chat_id, msg)
+    # Проверка погоды
+    if user_last_city.get(message.from_user.id) == "awaiting_city":
+        user_last_city[message.from_user.id] = text
+        bot.send_message(message.chat.id, get_weather(text))
+        return
 
-    except Exception as e:
-        logging.exception(e)
-        bot.send_message(chat_id, "Произошла ошибка при получении данных о погоде.")
+    # Проверка курса валют
+    if user_last_city.get(message.from_user.id) == "awaiting_currency":
+        user_last_city[message.from_user.id] = None
+        bot.send_message(message.chat.id, get_exchange(text))
+        return
 
-# Flask webhook
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+    # Установка ожидания
+    if text.lower() in ["погода", "🌤 погода"]:
+        user_last_city[message.from_user.id] = "awaiting_city"
+        bot.send_message(message.chat.id, "Введите город:")
+    elif text.lower() in ["курс", "💱 курсы валют"]:
+        user_last_city[message.from_user.id] = "awaiting_currency"
+        bot.send_message(message.chat.id, "Введите валюту (например USD, BTC):")
+
+    # История
+    elif text.lower() == "история":
+        last = user_last_city.get(message.from_user.id)
+        bot.send_message(message.chat.id, f"Ваш последний запрос: {last}")
+    elif "погода" in text.lower():
+        city = text.split("погода")[-1].strip()
+        bot.send_message(message.chat.id, get_weather(city))
+    elif "курс" in text.lower():
+        code = text.split("курс")[-1].strip()
+        bot.send_message(message.chat.id, get_exchange(code))
+
+# --- Webhook ---
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     bot.process_new_updates([types.Update.de_json(request.stream.read().decode("utf-8"))])
     return "OK", 200
 
-# Проверка внешнего URL от Render
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!"
+
 if __name__ == "__main__":
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
-    if not render_url:
-        raise RuntimeError("Ошибка: переменная окружения RENDER_EXTERNAL_URL не задана.")
-
     bot.remove_webhook()
-    bot.set_webhook(url=f"{render_url}/{BOT_TOKEN}")
-
+    bot.set_webhook(url=f"{os.environ.get('RENDER_EXTERNAL_URL')}/{TOKEN}")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
