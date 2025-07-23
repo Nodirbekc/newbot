@@ -1,5 +1,6 @@
-python-telegram-bot==20.3
-requests
-pytz
-openai
+pyTelegramBotAPI==4.10.0
+Flask
 gunicorn
+requests
+openai
+pytz
