@@ -1,130 +1,149 @@
 import os
+import requests
+import redis
 import telebot
 from flask import Flask, request
-import requests
+from datetime import datetime
 import pytz
-from datetime import datetime, timedelta
 
-# === API ключи из Render ===
+# Токены
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWM_API = os.getenv("OWM_API")
 EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
+# Redis для хранения истории ИИ
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST"),
+    port=int(os.getenv("REDIS_PORT")),
+    password=os.getenv("REDIS_PASSWORD"),
+    decode_responses=True
+)
+
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Хранилище истории
-user_last_city = {}
+# --- Хранилище состояния пользователей ---
+user_state = {}
+last_city = {}
 
-# === Клавиатура ===
-def main_keyboard():
-    kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("Погода", "Курс", "ИИ")
-    return kb
+# --- Вспомогательные функции ---
+def get_conversation_history(user_id):
+    key = f"history:{user_id}"
+    return redis_client.lrange(key, 0, -1) or []
 
-# === Команда /start ===
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.send_message(message.chat.id, "hillow hillow", reply_markup=main_keyboard())
+def add_to_history(user_id, role, content):
+    key = f"history:{user_id}"
+    redis_client.rpush(key, f"{role}: {content}")
+    redis_client.ltrim(key, -20, -1)
 
-# === Погода ===
-@bot.message_handler(func=lambda m: m.text == "Погода")
-def weather_request(message):
-    bot.send_message(message.chat.id, "Информацию о погоде какого города или страны хотите узнать?")
-
-@bot.message_handler(func=lambda m: m.text not in ["Погода", "Курс", "ИИ"] and message_has_weather_context(m))
-def weather_response(message):
-    city = message.text.strip()
-    user_last_city[message.from_user.id] = city
-    send_weather_info(message.chat.id, city)
-
-def message_has_weather_context(message):
-    return user_last_city.get(message.from_user.id, None) is None or message.text.lower() not in ["курс", "ии"]
-
-def send_weather_info(chat_id, city):
-    url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&units=metric&lang=ru&appid={OWM_API}"
-    res = requests.get(url)
-    if res.status_code != 200:
-        bot.send_message(chat_id, "Не нашёл такой город. Попробуй ещё раз.")
-        return
-    data = res.json()
-    current = data["list"][0]
-    temp = current["main"]["temp"]
-    feels = current["main"]["feels_like"]
-    wind = current["wind"]["speed"]
-    desc = current["weather"][0]["description"]
-    humidity = current["main"]["humidity"]
-
-    emoji = "🥶" if temp < 0 else "😎" if temp > 30 else "🙂"
-    text = (f"{emoji} Погода в {data['city']['name']} ({data['city']['country']}):\n"
-            f"Температура: {temp}°C (ощущается как {feels}°C)\n"
-            f"Ветер: {wind} м/с\n"
-            f"Осадки: {desc}\n"
-            f"Влажность: {humidity}%\n\n"
-            "Прогноз на 3 дня:\n")
-    for i in range(1, 4):
-        day = data["list"][i*8]
-        date = datetime.utcfromtimestamp(day["dt"]) + timedelta(hours=data["city"]["timezone"]/3600)
-        text += f"- {date.strftime('%d.%m %H:%M')}: {day['main']['temp']}°C, {day['weather'][0]['description']}\n"
-    bot.send_message(chat_id, text)
-
-# === Конвертация валют ===
-@bot.message_handler(func=lambda m: m.text == "Курс")
-def ask_currency(message):
-    bot.send_message(message.chat.id, "Напиши валюту и во что перевести (например: `10 BTC USD` или `100 USD UZS`).")
-
-@bot.message_handler(func=lambda m: len(m.text.split()) == 3 and m.text not in ["Погода", "ИИ"])
-def convert_currency(message):
-    try:
-        amount, from_cur, to_cur = message.text.upper().split()
-        amount = float(amount)
-        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{from_cur}/{to_cur}/{amount}"
-        r = requests.get(url)
-        data = r.json()
-        if r.status_code == 200 and data["result"] == "success":
-            result = data["conversion_result"]
-            bot.send_message(message.chat.id, f"{amount} {from_cur} = {result} {to_cur}")
-        else:
-            bot.send_message(message.chat.id, "Ошибка при конвертации валют.")
-    except:
-        bot.send_message(message.chat.id, "Формат: `10 BTC USD`")
-
-# === Чат с ИИ ===
-@bot.message_handler(func=lambda m: m.text == "ИИ")
-def ask_ai(message):
-    bot.send_message(message.chat.id, "Задай вопрос ИИ:")
-
-@bot.message_handler(func=lambda m: user_last_city.get(m.from_user.id) and m.text not in ["Погода", "Курс", "ИИ"])
-def ai_answer(message):
-    query = message.text.strip()
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    body = {
-        "model": "openai/gpt-3.5-turbo",
-        "messages": [{"role": "user", "content": query}]
-    }
-    res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers)
-    if res.status_code == 200:
-        ans = res.json()["choices"][0]["message"]["content"]
-        bot.send_message(message.chat.id, ans)
+def get_weather(city):
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OWM_API}&units=metric&lang=ru"
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    sunrise = datetime.utcfromtimestamp(data['sys']['sunrise'] + data['timezone']).strftime('%H:%M')
+    sunset = datetime.utcfromtimestamp(data['sys']['sunset'] + data['timezone']).strftime('%H:%M')
+    temp = data['main']['temp']
+    if temp <= 0:
+        emoji = "🥶"
+    elif temp < 20:
+        emoji = "🙂"
     else:
-        bot.send_message(message.chat.id, "Ошибка при запросе к ИИ.")
+        emoji = "🥵"
+    return (f"{emoji} Погода в {data['name']} ({data['sys']['country']}):\n"
+            f"Температура: {temp}°C (ощущается как {data['main']['feels_like']}°C)\n"
+            f"Влажность: {data['main']['humidity']}%\n"
+            f"Ветер: {data['wind']['speed']} м/с\n"
+            f"Давление: {data['main']['pressure']} hPa\n"
+            f"Осадки: {data['weather'][0]['description']}\n"
+            f"Восход: {sunrise}  Закат: {sunset}")
 
-# === Webhook ===
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def convert_currency(amount, from_currency, to_currency):
+    url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{from_currency}/{to_currency}/{amount}"
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    return f"{amount} {from_currency} = {data['conversion_result']} {to_currency}"
+
+def query_ai(user_id, message):
+    history = get_conversation_history(user_id)
+    context = "\n".join(history) + f"\nUser: {message}\nAI:"
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+    data = {"model": "openrouter/openai/gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": context}]}
+    res = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers, json=data)
+    ai_reply = res.json()["choices"][0]["message"]["content"]
+    add_to_history(user_id, "User", message)
+    add_to_history(user_id, "AI", ai_reply)
+    return ai_reply
+
+# --- Команды ---
+@bot.message_handler(commands=['start'])
+def start(message):
+    kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("Погода", "Конвертация", "ИИ")
+    bot.send_message(message.chat.id, "hillow hillow", reply_markup=kb)
+
+@bot.message_handler(func=lambda m: m.text == "Погода")
+def weather_button(message):
+    user_state[message.chat.id] = "weather"
+    bot.send_message(message.chat.id, "Информацию о погоде какого города хотите узнать?")
+
+@bot.message_handler(func=lambda m: m.text == "Конвертация")
+def convert_button(message):
+    user_state[message.chat.id] = "convert"
+    bot.send_message(message.chat.id, "Напиши так: <сумма> <из валюты> <в валюту>\nПример: 10 USD UZS")
+
+@bot.message_handler(func=lambda m: m.text == "ИИ")
+def ai_button(message):
+    user_state[message.chat.id] = "ai"
+    bot.send_message(message.chat.id, "Задай свой вопрос ИИ:")
+
+@bot.message_handler(func=lambda m: True)
+def handle_message(message):
+    state = user_state.get(message.chat.id)
+    if state == "weather":
+        text = get_weather(message.text)
+        if text:
+            last_city[message.chat.id] = message.text
+            bot.send_message(message.chat.id, text)
+        else:
+            bot.send_message(message.chat.id, "Не нашёл такой город. Попробуй ещё раз.")
+        user_state[message.chat.id] = None
+
+    elif state == "convert":
+        try:
+            parts = message.text.split()
+            amount = float(parts[0])
+            from_currency = parts[1].upper()
+            to_currency = parts[2].upper()
+            res = convert_currency(amount, from_currency, to_currency)
+            bot.send_message(message.chat.id, res if res else "Ошибка при конвертации.")
+        except:
+            bot.send_message(message.chat.id, "Формат: 10 USD UZS")
+        user_state[message.chat.id] = None
+
+    elif state == "ai":
+        ai_answer = query_ai(message.chat.id, message.text)
+        bot.send_message(message.chat.id, ai_answer)
+        user_state[message.chat.id] = None
+
+# --- Flask (webhook) ---
+@app.route(f"/{BOT_TOKEN}", methods=['POST'])
 def webhook():
     update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
     bot.process_new_updates([update])
     return "OK", 200
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def index():
     return "Бот работает", 200
 
-# === Запуск ===
+# --- Запуск ---
 if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(url=f"{os.getenv('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}")
