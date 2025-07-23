@@ -1,6 +1,5 @@
-pyTelegramBotAPI==4.10.0
-Flask
-python-dotenv
-gunicorn
+python-telegram-bot==20.3
 requests
 pytz
+openai
+gunicorn
