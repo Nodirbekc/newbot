@@ -1,7 +1,4 @@
-pyTelegramBotAPI==4.10.0
-Flask
-gunicorn
-requests
-openai
-pytz
-redis
+pyTelegramBotAPI==4.12.0
+Flask==2.3.2
+requests==2.31.0
+google-genai==0.1.0

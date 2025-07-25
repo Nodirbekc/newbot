@@ -3,14 +3,17 @@ import telebot
 from flask import Flask, request
 import requests
 from datetime import datetime
+from google import genai
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWM_API = os.getenv("OWM_API")
 EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# === Инициализация ===
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
+gemini_client = genai.Client()  # Gemini AI
 user_histories = {}
 
 # === Погода ===
@@ -70,20 +73,14 @@ def convert_currency(amount, base, target):
 
 # === Gemini AI ===
 def ask_ai(user_id, text):
-    if not GEMINI_API_KEY:
-        return "Ошибка: ключ Gemini не задан."
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": text}]}]
-        }
-        headers = {"Content-Type": "application/json"}
-        r = requests.post(url, headers=headers, json=payload, timeout=15)
-        if r.status_code == 200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return f"ИИ недоступен (код {r.status_code})."
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=text
+        )
+        return response.text
     except Exception as e:
-        return f"Ошибка AI: {str(e)}"
+        return f"Ошибка AI: {e}"
 
 # === Обработчики ===
 @bot.message_handler(commands=['start'])
