@@ -2,7 +2,6 @@ import os
 import telebot
 from flask import Flask, request
 import requests
-import pytz
 from datetime import datetime
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,31 +15,30 @@ app = Flask(__name__)
 # ==== История диалогов для ИИ ====
 user_histories = {}
 
-# ==== Функции вспомогательные ====
+# ==== Функции ====
 def get_weather(city):
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid={OWM_API}&lang=ru"
     res = requests.get(url)
     if res.status_code != 200:
-        return None
+        return "Ошибка: город не найден или API недоступен."
     data = res.json()
     sunrise = datetime.utcfromtimestamp(data['sys']['sunrise'] + data['timezone']).strftime('%H:%M')
     sunset = datetime.utcfromtimestamp(data['sys']['sunset'] + data['timezone']).strftime('%H:%M')
-    text = (
+    return (
         f"🏙 Погода в {data['name']}, {data['sys']['country']}\n"
         f"🌡 Температура: {data['main']['temp']}°C (ощущается {data['main']['feels_like']}°C)\n"
         f"💨 Ветер: {data['wind']['speed']} м/с\n"
         f"💧 Влажность: {data['main']['humidity']}%\n"
         f"🌅 Восход: {sunrise}\n"
         f"🌇 Закат: {sunset}\n"
-        f"☁ Осадки: {data['weather'][0]['description']}"
+        f"☁ Осадки: {data['weather'][0]['description'].capitalize()}"
     )
-    return text
 
 def get_currency_rate(base, target):
     url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{base}/{target}"
     r = requests.get(url)
-    if r.status_code == 200:
-        return r.json().get("conversion_rate")
+    if r.status_code == 200 and "conversion_rate" in r.json():
+        return r.json()["conversion_rate"]
     return None
 
 def get_crypto_price(crypto, target):
@@ -51,6 +49,8 @@ def get_crypto_price(crypto, target):
     return None
 
 def ask_ai(user_id, text):
+    if not OPENROUTER_API_KEY:
+        return "Ошибка: ключ OpenRouter не задан."
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -58,7 +58,7 @@ def ask_ai(user_id, text):
     messages = user_histories.get(user_id, [])
     messages.append({"role": "user", "content": text})
     payload = {
-        "model": "openrouter/gpt-3.5-turbo",
+        "model": "openai/gpt-3.5-turbo",
         "messages": messages
     }
     r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
@@ -67,26 +67,26 @@ def ask_ai(user_id, text):
         messages.append({"role": "assistant", "content": answer})
         user_histories[user_id] = messages[-10:]
         return answer
-    return "Ошибка AI."
+    return "Ошибка AI API."
 
 # ==== Обработчики ====
 @bot.message_handler(commands=['start'])
 def start_message(message):
     keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add("Погода", "Конвертация валют", "ИИ")
-    bot.send_message(message.chat.id, "hillow hillow", reply_markup=keyboard)
+    bot.send_message(message.chat.id, "Привет! Что тебя интересует?", reply_markup=keyboard)
 
 @bot.message_handler(func=lambda m: m.text == "Погода")
 def ask_city(message):
-    bot.send_message(message.chat.id, "Информацию о погоде какого города хотите узнать?")
+    bot.send_message(message.chat.id, "Напиши название города для прогноза погоды:")
 
 @bot.message_handler(func=lambda m: m.text == "Конвертация валют")
 def ask_currency(message):
-    bot.send_message(message.chat.id, "Напиши: <СУММА> <ИЗ_ВАЛЮТЫ> в <В_ВАЛЮТУ>\nПример: 10 BTC в USD")
+    bot.send_message(message.chat.id, "Формат: <СУММА> <ИЗ_ВАЛЮТЫ> в <В_ВАЛЮТУ>\nПример: 10 BTC в USD")
 
 @bot.message_handler(func=lambda m: m.text == "ИИ")
 def ask_ai_message(message):
-    bot.send_message(message.chat.id, "Напиши вопрос для AI:")
+    bot.send_message(message.chat.id, "Напиши свой вопрос для ИИ:")
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
@@ -98,23 +98,22 @@ def handle_all(message):
             amount, from_to = text.split(" ", 1)
             amount = float(amount)
             base, target = from_to.upper().split(" В ")
-            # Проверка крипты
             crypto_price = get_crypto_price(base, target)
             if crypto_price:
-                bot.send_message(message.chat.id, f"{amount} {base} = {amount * crypto_price} {target}")
+                bot.send_message(message.chat.id, f"{amount} {base} = {round(amount * crypto_price, 4)} {target}")
                 return
             rate = get_currency_rate(base, target)
             if rate:
-                bot.send_message(message.chat.id, f"{amount} {base} = {round(amount*rate, 2)} {target}")
+                bot.send_message(message.chat.id, f"{amount} {base} = {round(amount * rate, 2)} {target}")
             else:
-                bot.send_message(message.chat.id, "Не удалось найти валюту.")
-        except:
-            bot.send_message(message.chat.id, "Формат неправильный. Пример: 10 BTC в USD")
+                bot.send_message(message.chat.id, "Не удалось найти валюту или криптовалюту.")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"Ошибка формата: {str(e)}\nПример: 10 BTC в USD")
         return
 
     # Погода
     weather = get_weather(text)
-    if weather:
+    if weather and "Ошибка" not in weather:
         bot.send_message(message.chat.id, weather)
         return
 
