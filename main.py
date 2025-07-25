@@ -7,7 +7,7 @@ from datetime import datetime
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWM_API = os.getenv("OWM_API")
 EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -15,83 +15,75 @@ user_histories = {}
 
 # === Погода ===
 def get_weather(city):
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid={OWM_API}&lang=ru"
-    res = requests.get(url)
-    if res.status_code != 200:
-        return "Ошибка: город не найден или API недоступен."
-    data = res.json()
-    sunrise = datetime.utcfromtimestamp(data['sys']['sunrise'] + data['timezone']).strftime('%H:%M')
-    sunset = datetime.utcfromtimestamp(data['sys']['sunset'] + data['timezone']).strftime('%H:%M')
-    return (
-        f"🏙 Погода в {data['name']}, {data['sys']['country']}\n"
-        f"🌡 Температура: {data['main']['temp']}°C (ощущается {data['main']['feels_like']}°C)\n"
-        f"💨 Ветер: {data['wind']['speed']} м/с\n"
-        f"💧 Влажность: {data['main']['humidity']}%\n"
-        f"🌅 Восход: {sunrise}\n"
-        f"🌇 Закат: {sunset}\n"
-        f"☁ Осадки: {data['weather'][0]['description'].capitalize()}"
-    )
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid={OWM_API}&lang=ru"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return "Ошибка: город не найден или API недоступен."
+        data = res.json()
+        sunrise = datetime.utcfromtimestamp(data['sys']['sunrise'] + data['timezone']).strftime('%H:%M')
+        sunset = datetime.utcfromtimestamp(data['sys']['sunset'] + data['timezone']).strftime('%H:%M')
+        return (
+            f"🏙 Погода в {data['name']}, {data['sys']['country']}\n"
+            f"🌡 Температура: {data['main']['temp']}°C (ощущается {data['main']['feels_like']}°C)\n"
+            f"💨 Ветер: {data['wind']['speed']} м/с\n"
+            f"💧 Влажность: {data['main']['humidity']}%\n"
+            f"🌅 Восход: {sunrise}\n"
+            f"🌇 Закат: {sunset}\n"
+            f"☁ Осадки: {data['weather'][0]['description'].capitalize()}"
+        )
+    except:
+        return "Ошибка получения погоды."
 
-# === Конвертация ===
+# === Курсы валют и крипты ===
 def get_currency_rate(base, target):
     url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{base}/{target}"
-    r = requests.get(url)
+    r = requests.get(url, timeout=10)
     if r.status_code == 200 and "conversion_rate" in r.json():
         return r.json()["conversion_rate"]
     return None
 
 def get_crypto_price(crypto, target):
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={crypto.lower()}&vs_currencies={target.lower()}"
-    r = requests.get(url)
+    r = requests.get(url, timeout=10)
     if r.status_code == 200:
         return r.json().get(crypto.lower(), {}).get(target.lower())
     return None
 
 def convert_currency(amount, base, target):
-    # 1. Пробуем как крипта → валюта
-    crypto_price = get_crypto_price(base, target)
-    if crypto_price:
-        return amount * crypto_price
+    # 1. crypto → fiat
+    crypto_to_fiat = get_crypto_price(base, target)
+    if crypto_to_fiat:
+        return amount * crypto_to_fiat
 
-    # 2. Пробуем как валюта → крипта
-    crypto_price_reverse = get_crypto_price(target, base)
-    if crypto_price_reverse:
-        return amount / crypto_price_reverse
+    # 2. fiat → crypto
+    fiat_to_crypto = get_crypto_price(target, base)
+    if fiat_to_crypto:
+        return amount / fiat_to_crypto
 
-    # 3. Пробуем обычные валюты
+    # 3. fiat → fiat
     rate = get_currency_rate(base, target)
     if rate:
         return amount * rate
 
     return None
 
-# === AI ===
+# === Gemini AI ===
 def ask_ai(user_id, text):
-    if not OPENROUTER_API_KEY:
-        return "Ошибка: ключ OpenRouter не задан."
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    messages = user_histories.get(user_id, [])
-    messages.append({"role": "user", "content": text})
-    payload = {
-        "model": "openai/gpt-3.5-turbo",  # стабильная модель
-        "messages": messages
-    }
-
+    if not GEMINI_API_KEY:
+        return "Ошибка: ключ Gemini не задан."
     try:
-        r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=15)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": text}]}]
+        }
+        headers = {"Content-Type": "application/json"}
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
         if r.status_code == 200:
-            answer = r.json()['choices'][0]['message']['content']
-            messages.append({"role": "assistant", "content": answer})
-            user_histories[user_id] = messages[-10:]
-            return answer
-        else:
-            return "ИИ временно недоступен (ошибка API)."
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return f"ИИ недоступен (код {r.status_code})."
     except Exception as e:
-        return f"ИИ временно недоступен: {str(e)}"
+        return f"Ошибка AI: {str(e)}"
 
 # === Обработчики ===
 @bot.message_handler(commands=['start'])
@@ -116,19 +108,14 @@ def ask_ai_message(message):
 def handle_all(message):
     text = message.text.strip()
 
-    # Конвертация (ищем паттерн)
+    # --- Конвертация ---
     if " в " in text.lower() and any(ch.isdigit() for ch in text):
         try:
             parts = text.split()
             amount = float(parts[0])
-            if "в" in parts:
-                idx = parts.index("в")
-                base = parts[1].upper()
-                target = parts[idx+1].upper()
-            else:
-                base = parts[1].upper()
-                target = parts[2].upper()
-
+            idx = parts.index("в")
+            base = parts[1].upper()
+            target = parts[idx+1].upper()
             result = convert_currency(amount, base, target)
             if result is not None:
                 bot.send_message(message.chat.id, f"{amount} {base} = {round(result, 6)} {target}")
@@ -138,13 +125,13 @@ def handle_all(message):
             bot.send_message(message.chat.id, f"Ошибка формата: {str(e)}\nПример: 10 BTC в USD")
         return
 
-    # Погода
+    # --- Погода ---
     weather = get_weather(text)
     if weather and not weather.startswith("Ошибка"):
         bot.send_message(message.chat.id, weather)
         return
 
-    # AI
+    # --- ИИ ---
     answer = ask_ai(message.chat.id, text)
     bot.send_message(message.chat.id, answer)
 
