@@ -103,14 +103,10 @@ def ask_deepseek(prompt: str, history: list = None) -> str:
 def ask_gemini(prompt: str) -> str:
     """Gemini API"""
     if not GEMINI_API_KEY:
-        return "❌ API ключ Gemini не настроен. Настрой GOOGLE_API_KEY в переменных окружения."
+        return "❌ API ключ Gemini не настроен"
     
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY
-        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
         
         data = {
             "contents": [{
@@ -118,15 +114,22 @@ def ask_gemini(prompt: str) -> str:
             }]
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(url, json=data, timeout=30)
         response_data = response.json()
         
-        # Безопасное извлечение ответа Gemini
+        # Логируем ответ для дебага
+        logging.info(f"Gemini response: {response_data}")
+        
+        # Проверяем разные возможные форматы ответа
         if response_data.get("candidates") and len(response_data["candidates"]) > 0:
             candidate = response_data["candidates"][0]
             if "content" in candidate and "parts" in candidate["content"]:
                 return candidate["content"]["parts"][0].get("text", "Пустой ответ от Gemini")
         
+        # Если нет candidates, проверяем error
+        if "error" in response_data:
+            return f"❌ Ошибка Gemini: {response_data['error'].get('message', 'Unknown error')}"
+            
         return "❌ Не удалось получить ответ от Gemini"
             
     except Exception as e:
