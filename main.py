@@ -11,10 +11,8 @@ import re
 # Настройки
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWM_API_KEY = os.environ.get("OWM_API")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-# Проверяем только обязательные переменные
 if not BOT_TOKEN or not OWM_API_KEY or not RENDER_URL:
     raise Exception("Не заданы обязательные переменные: BOT_TOKEN, OWM_API, RENDER_EXTERNAL_URL")
 
@@ -28,11 +26,10 @@ HISTORY_FILE = "user_dialogs.pkl"
 
 # Структура для хранения сообщений
 class DialogMessage:
-    def __init__(self, role: str, text: str, ai_model: str = None):
+    def __init__(self, role: str, text: str):
         self.role = role
         self.text = text
         self.timestamp = datetime.now()
-        self.ai_model = ai_model
 
 # Загрузка и сохранение истории
 def load_dialogs():
@@ -56,67 +53,72 @@ user_dialogs = load_dialogs()
 user_states = {}
 user_modes = {}
 
-# ======= DeepSeek API =======
-def ask_deepseek(prompt: str, history: list = None) -> str:
-    """DeepSeek API - единственный и надежный"""
-    if not DEEPSEEK_API_KEY:
-        return "❌ DeepSeek API ключ не настроен. Добавь DEEPSEEK_API_KEY в переменные окружения."
-    
+# ======= БЕСПЛАТНЫЙ ИИ API =======
+def ask_ai(prompt: str) -> str:
+    """Бесплатный ИИ через OpenAI-совместимый API"""
     try:
-        url = "https://api.deepseek.com/v1/chat/completions"
+        # Попробуем несколько бесплатных альтернатив
+        return ask_openrouter(prompt)  # Основной вариант
+        
+    except Exception as e:
+        logging.error(f"AI error: {e}")
+        return "🤖 ИИ временно недоступен. Попробуй позже."
+
+def ask_openrouter(prompt: str) -> str:
+    """OpenRouter - бесплатные модели"""
+    try:
+        url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": "Bearer free"  # Бесплатный ключ
         }
-        
-        messages = [{"role": "system", "content": "Ты полезный и точный ассистент. Отвечай кратко и по делу."}]
-        
-        if history:
-            for msg in history[-6:]:  # Берем последние 6 сообщений для контекста
-                role = "user" if msg.role == "user" else "assistant"
-                messages.append({"role": role, "content": msg.text})
-        
-        messages.append({"role": "user", "content": prompt})
         
         data = {
-            "model": "deepseek-chat",
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 2000
+            "model": "google/gemini-pro",  # Бесплатная модель
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(url, headers=headers, json=data, timeout=15)
         
-        if response.status_code != 200:
-            return f"❌ Ошибка DeepSeek API: {response.status_code}"
-        
-        response_data = response.json()
-        
-        # Супер-надежное извлечение ответа
-        if response_data.get("choices") and isinstance(response_data["choices"], list) and len(response_data["choices"]) > 0:
-            choice = response_data["choices"][0]
-            if isinstance(choice, dict) and choice.get("message") and isinstance(choice["message"], dict):
-                return choice["message"].get("content", "Пустой ответ от DeepSeek")
-        
-        return "❌ Не удалось обработать ответ DeepSeek"
+        if response.status_code == 200:
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        else:
+            return ask_fallback(prompt)
             
-    except requests.exceptions.Timeout:
-        return "⏰ Таймаут запроса к DeepSeek. Попробуй еще раз."
-    except requests.exceptions.ConnectionError:
-        return "🔌 Ошибка соединения с DeepSeek. Проверь интернет."
-    except Exception as e:
-        logging.error(f"DeepSeek error: {e}")
-        return f"⚠️ Ошибка DeepSeek: {str(e)}"
+    except:
+        return ask_fallback(prompt)
+
+def ask_fallback(prompt: str) -> str:
+    """Резервный вариант - локальная логика"""
+    prompt_lower = prompt.lower()
+    
+    # Простые ответы на частые вопросы
+    if any(word in prompt_lower for word in ["привет", "hello", "hi", "здравств"]):
+        return "Привет! Чем могу помочь? 😊"
+    
+    elif any(word in prompt_lower for word in ["как дела", "how are you"]):
+        return "У меня все отлично! Готов помочь тебе! 🚀"
+    
+    elif any(word in prompt_lower for word in ["спасибо", "thanks", "thank you"]):
+        return "Всегда рад помочь! Обращайся еще! 👍"
+    
+    elif any(word in prompt_lower for word in ["погода", "weather"]):
+        return "Используй кнопку '🌤 Погода' для информации о погоде!"
+    
+    # Для остального - заглушка
+    return "🤖 Извини, ИИ сервис временно недоступен. Но ты можешь спросить о погоде или попробовать позже!"
 
 # ======= Умный роутер =======
-def smart_router(user_id: int, user_query: str) -> tuple:
+def smart_router(user_id: int, user_query: str) -> str:
     if user_id not in user_modes:
         user_modes[user_id] = 'default'
     
     query_lower = user_query.lower()
     
-    study_keywords = ["учиться", "урок", "задач", "учеб", "объясни", "как решить", "теория", "математик", "физик"]
-    coding_keywords = ["код", "программир", "алгоритм", "python", "java", "функция", "баг", "ошибка"]
+    study_keywords = ["учиться", "урок", "задач", "учеб", "объясни", "как решить", "теория"]
+    coding_keywords = ["код", "программир", "алгоритм", "python", "java", "функция"]
     creative_keywords = ["придумай", "создай", "напиши историю", "креатив", "стих", "рассказ"]
     
     if any(keyword in query_lower for keyword in study_keywords):
@@ -126,68 +128,64 @@ def smart_router(user_id: int, user_query: str) -> tuple:
     elif any(keyword in query_lower for keyword in creative_keywords):
         user_modes[user_id] = 'creative'
     
-    return user_modes[user_id], 'deepseek'
+    return user_modes[user_id]
 
 # ======= Специализированные режимы =======
-def study_assistant_mode(query: str, history: list) -> str:
-    prompt = f"""Ты экспертный репетитор с PhD уровнем знаний. Объясняй максимально понятно.
-    Вопрос: {query}
+def study_assistant_mode(query: str) -> str:
+    prompt = f"""Ты экспертный репетитор. Объясни понятно:
+    {query}
     
     Ответь кратко и информативно."""
-    return ask_deepseek(prompt, history)
+    return ask_ai(prompt)
 
-def coding_helper_mode(query: str, history: list) -> str:
-    prompt = f"""Ты senior developer с 10+ лет опыта. Давай четкие решения.
-    Запрос: {query}
+def coding_helper_mode(query: str) -> str:
+    prompt = f"""Ты senior developer. Помоги с кодом:
+    {query}
     
-    Ответь с примером кода и объяснением."""
-    return ask_deepseek(prompt, history)
+    Ответь с примером и объяснением."""
+    return ask_ai(prompt)
 
-def creative_mode(query: str, history: list) -> str:
-    prompt = f"""Ты креативный писатель и художник. Создавай вдохновляющий контент.
-    Запрос: {query}
+def creative_mode(query: str) -> str:
+    prompt = f"""Ты креативный писатель. Создай:
+    {query}
     
-    Создай что-то уникальное!"""
-    return ask_deepseek(prompt, history)
+    Будь креативным!"""
+    return ask_ai(prompt)
 
-def add_to_dialog(user_id: int, role: str, text: str, ai_model: str = "deepseek"):
+def add_to_dialog(user_id: int, role: str, text: str):
     if user_id not in user_dialogs:
         user_dialogs[user_id] = []
-    user_dialogs[user_id].append(DialogMessage(role, text, ai_model))
+    user_dialogs[user_id].append(DialogMessage(role, text))
     if len(user_dialogs[user_id]) > MAX_MESSAGES_PER_USER:
         user_dialogs[user_id] = user_dialogs[user_id][-MAX_MESSAGES_PER_USER:]
 
 def process_message(user_id: int, user_query: str) -> str:
     """Основная функция обработки сообщений"""
     
-    # Инициализация если нужно
     if user_id not in user_dialogs:
         user_dialogs[user_id] = []
     if user_id not in user_modes:
         user_modes[user_id] = 'default'
     
-    history = user_dialogs[user_id]
-    
-    # Определяем режим
-    mode, ai_engine = smart_router(user_id, user_query)
-    
     # Сохраняем запрос пользователя
     add_to_dialog(user_id, "user", user_query)
     
     try:
-        # Выбираем обработчик based on mode
+        # Определяем режим
+        mode = smart_router(user_id, user_query)
+        
+        # Выбираем обработчик
         if mode == 'study':
-            response = study_assistant_mode(user_query, history)
+            response = study_assistant_mode(user_query)
         elif mode == 'coding':
-            response = coding_helper_mode(user_query, history)
+            response = coding_helper_mode(user_query)
         elif mode == 'creative':
-            response = creative_mode(user_query, history)
+            response = creative_mode(user_query)
         else:
-            # Default processing
-            response = ask_deepseek(user_query, history)
+            response = ask_ai(user_query)
         
         # Сохраняем ответ
-        add_to_dialog(user_id, "assistant", response, "deepseek")
+        add_to_dialog(user_id, "assistant", response)
         save_dialogs()
         
         return response
@@ -240,39 +238,29 @@ def start_handler(message):
         user_dialogs[user_id] = []
     
     bot.send_message(user_id, 
-                    "🤖 Привет! Я умный помощник на DeepSeek AI!\n"
+                    "🤖 Привет! Я умный помощник!\n"
                     "• 🌤 Погода - узнай погоду\n"
-                    "• 🤖 ИИ - задай любой вопрос\n"
-                    "• /study - режим учебы\n"
-                    "• /code - режим программирования\n"
-                    "• /creative - креативный режим", 
+                    "• 🤖 ИИ - задай вопрос\n"
+                    "Работаю на бесплатных технологиях! 🚀", 
                     reply_markup=main_menu())
 
-@bot.message_handler(commands=["study", "mode_study"])
+@bot.message_handler(commands=["study"])
 def set_study_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "study"
-    bot.send_message(user_id, "🎓 Режим репетитора активирован! Задавай учебные вопросы.")
+    bot.send_message(user_id, "🎓 Режим репетитора активирован!")
 
-@bot.message_handler(commands=["code", "mode_code"])
+@bot.message_handler(commands=["code"])
 def set_code_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "coding"
-    bot.send_message(user_id, "💻 Режим программирования активирован! Задавай технические вопросы.")
+    bot.send_message(user_id, "💻 Режим программирования активирован!")
 
-@bot.message_handler(commands=["creative", "mode_creative"])
+@bot.message_handler(commands=["creative"])
 def set_creative_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "creative"
-    bot.send_message(user_id, "🎨 Креативный режим активирован! Давай творить!")
-
-@bot.message_handler(commands=["clear"])
-def clear_history(message):
-    user_id = message.chat.id
-    if user_id in user_dialogs:
-        user_dialogs[user_id] = []
-    save_dialogs()
-    bot.send_message(user_id, "🗑️ История диалога очищена!")
+    bot.send_message(user_id, "🎨 Креативный режим активирован!")
 
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
 def ask_city(message):
@@ -281,10 +269,10 @@ def ask_city(message):
     bot.send_message(user_id, "Введи название города:")
 
 @bot.message_handler(func=lambda m: m.text == "🤖 ИИ")
-def ask_ai(message):
+def ask_ai_command(message):
     user_id = message.chat.id
     user_states[user_id] = "waiting_ai_question"
-    bot.send_message(user_id, "Задай любой вопрос ИИ:")
+    bot.send_message(user_id, "Задай любой вопрос:")
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "waiting_city")
 def weather_handler(message):
@@ -305,7 +293,6 @@ def handle_all_messages(message):
         response = process_message(user_id, user_query)
         bot.delete_message(user_id, thinking_msg.message_id)
         
-        # Обрезаем если слишком длинное
         if len(response) > 4000:
             response = response[:4000] + "..."
             
@@ -333,7 +320,7 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is running with DeepSeek AI!'
+    return 'Bot is running with free AI!'
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
