@@ -4,15 +4,12 @@ import requests
 from datetime import datetime
 from flask import Flask, request
 from telebot import TeleBot, types
-from dotenv import load_dotenv
 
-# Загружаем .env
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWM_API_KEY = os.getenv("OWM_API")  # ключ OpenWeatherMap
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")  # ключ Gemini
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+# Настройки (можно задать через переменные окружения Render)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OWM_API_KEY = os.environ.get("OWM_API")
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN or not OWM_API_KEY or not GEMINI_API_KEY or not RENDER_URL:
     raise Exception("Не заданы переменные окружения BOT_TOKEN, OWM_API, GOOGLE_API_KEY, RENDER_EXTERNAL_URL")
@@ -135,6 +132,9 @@ def handle_ai_request(message):
     
     try:
         answer = ask_gemini(question)
+        # Обрезаем ответ если слишком длинный для Telegram
+        if len(answer) > 4000:
+            answer = answer[:4000] + "..."
         bot.send_message(chat_id, f"🤖 Gemini ответ:\n\n{answer}")
         user_states[chat_id] = "main_menu"
         
@@ -154,3 +154,24 @@ def handle_unknown(message):
     else:
         bot.send_message(chat_id, "Не понимаю команду. Выбери действие из меню:", reply_markup=main_menu())
         user_states[chat_id] = "main_menu"
+
+# ======= Webhook для Render =======
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    return 'OK'
+
+@app.route('/')
+def index():
+    return 'Bot is running!'
+
+if __name__ == '__main__':
+    # Удаляем предыдущие webhook
+    bot.remove_webhook()
+    # Устанавливаем webhook
+    bot.set_webhook(url=RENDER_URL + '/' + BOT_TOKEN)
+    app.run(host='0.0.0.0', port=5000)
