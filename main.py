@@ -4,6 +4,9 @@ from flask import Flask, request
 import requests
 from datetime import datetime
 from google import genai
+import os
+
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWM_API = os.getenv("OWM_API")
