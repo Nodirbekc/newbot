@@ -1,11 +1,12 @@
 import os
 import logging
 import requests
+import json
 from datetime import datetime
 from flask import Flask, request
 from telebot import TeleBot, types
 
-# Настройки (можно задать через переменные окружения Render)
+# Настройки
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWM_API_KEY = os.environ.get("OWM_API")
 GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -18,45 +19,88 @@ bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Хранилище состояний пользователей
+# Хранилище состояний и истории диалогов
 user_states = {}
+user_dialogs = {}  # {user_id: [{"role": "user", "parts": [{"text": "..."}]}, ...]}
+MAX_HISTORY = 20  # Максимальное количество сообщений в истории
 
 # ======= КНОПКИ =======
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🌤 Погода"))
     markup.add(types.KeyboardButton("🤖 ИИ"))
+    markup.add(types.KeyboardButton("🗑️ Очистить историю"))
     return markup
 
-# ======= Gemini =======
-def ask_gemini(prompt: str) -> str:
+# ======= Gemini с историей =======
+def ask_gemini_with_history(user_id: int, prompt: str) -> str:
+    # Добавляем новое сообщение в историю
+    add_to_dialog(user_id, "user", prompt)
+    
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     headers = {
         "Content-Type": "application/json",
         "X-goog-api-key": GEMINI_API_KEY
     }
-    data = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
+    
+    # Создаем системный промпт для контекста
+    system_prompt = {
+        "role": "user",
+        "parts": [{"text": "Ты полезный ассистент в Telegram боте. Отвечай кратко и по делу. Будь дружелюбным."}]
     }
+    
+    # Формируем полный контекст
+    full_history = [system_prompt] + user_dialogs.get(user_id, [])
+    
+    data = {
+        "contents": full_history,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.8,
+            "maxOutputTokens": 1024
+        }
+    }
+    
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=30)
         if resp.status_code != 200:
             return f"Ошибка Gemini API: {resp.status_code} - {resp.text}"
 
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        response_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Добавляем ответ в историю
+        add_to_dialog(user_id, "model", response_text)
+        
+        return response_text
     except Exception as e:
         return f"Произошла ошибка при обращении к Gemini: {str(e)}"
+
+def add_to_dialog(user_id: int, role: str, text: str):
+    if user_id not in user_dialogs:
+        user_dialogs[user_id] = []
+    
+    user_dialogs[user_id].append({
+        "role": role,
+        "parts": [{"text": text}]
+    })
+    
+    # Ограничиваем историю
+    if len(user_dialogs[user_id]) > MAX_HISTORY * 2:  # *2 потому что пары user-model
+        user_dialogs[user_id] = user_dialogs[user_id][-MAX_HISTORY * 2:]
+
+def clear_dialog_history(user_id: int):
+    if user_id in user_dialogs:
+        user_dialogs[user_id] = []
 
 # ======= /start =======
 @bot.message_handler(commands=["start"])
 def start_handler(message):
     user_id = message.chat.id
     user_states[user_id] = "main_menu"
-    bot.send_message(message.chat.id, "Привет! Я бот 🤖\nВыбери действие:", reply_markup=main_menu())
+    clear_dialog_history(user_id)  # Очищаем историю при старте
+    bot.send_message(message.chat.id, 
+                    "Привет! Я бот с памятью 🤖\nЯ запоминаю наш разговор!\nВыбери действие:", 
+                    reply_markup=main_menu())
 
 # ======= Погода =======
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
@@ -69,7 +113,13 @@ def ask_city(message):
 def ask_ai(message):
     user_id = message.chat.id
     user_states[user_id] = "waiting_ai_question"
-    bot.send_message(message.chat.id, "Задай вопрос ИИ:")
+    bot.send_message(message.chat.id, "Задай вопрос ИИ. Я помню предыдущие сообщения!")
+
+@bot.message_handler(func=lambda m: m.text == "🗑️ Очистить историю")
+def clear_history(message):
+    user_id = message.chat.id
+    clear_dialog_history(user_id)
+    bot.send_message(message.chat.id, "История диалога очищена! 🗑️", reply_markup=main_menu())
 
 # ======= Обработка запросов погоды =======
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "waiting_city")
@@ -118,7 +168,7 @@ def handle_weather_request(message):
         bot.send_message(chat_id, f"Произошла ошибка: {str(e)}")
         user_states[chat_id] = "main_menu"
 
-# ======= Обработка запросов к ИИ =======
+# ======= Обработка запросов к ИИ с историей =======
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "waiting_ai_question")
 def handle_ai_request(message):
     chat_id = message.chat.id
@@ -128,19 +178,39 @@ def handle_ai_request(message):
         bot.send_message(chat_id, "Вопрос не может быть пустым. Попробуй еще раз:")
         return
     
-    bot.send_message(chat_id, "🤖 Думаю...")
+    # Показываем что бот "думает"
+    thinking_msg = bot.send_message(chat_id, "🤖 Думаю...")
     
     try:
-        answer = ask_gemini(question)
+        answer = ask_gemini_with_history(chat_id, question)
+        
         # Обрезаем ответ если слишком длинный для Telegram
         if len(answer) > 4000:
             answer = answer[:4000] + "..."
-        bot.send_message(chat_id, f"🤖 Gemini ответ:\n\n{answer}")
-        user_states[chat_id] = "main_menu"
+        
+        # Удаляем сообщение "Думаю..." и отправляем ответ
+        bot.delete_message(chat_id, thinking_msg.message_id)
+        bot.send_message(chat_id, f"🤖 {answer}")
         
     except Exception as e:
         bot.send_message(chat_id, f"Произошла ошибка при обработке запроса: {str(e)}")
         user_states[chat_id] = "main_menu"
+
+# ======= Команда для просмотра истории =======
+@bot.message_handler(commands=["history"])
+def show_history(message):
+    user_id = message.chat.id
+    if user_id in user_dialogs and user_dialogs[user_id]:
+        history_count = len([msg for msg in user_dialogs[user_id] if msg["role"] == "user"])
+        bot.send_message(user_id, f"📊 В истории: {history_count} сообщений\nИспользуй /clear_history чтобы очистить")
+    else:
+        bot.send_message(user_id, "История диалога пуста")
+
+@bot.message_handler(commands=["clear_history"])
+def clear_history_command(message):
+    user_id = message.chat.id
+    clear_dialog_history(user_id)
+    bot.send_message(user_id, "История диалога очищена! 🗑️")
 
 # ======= Обработка неизвестных команд =======
 @bot.message_handler(func=lambda m: True)
@@ -167,7 +237,7 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is running!'
+    return 'Bot is running with memory!'
 
 if __name__ == '__main__':
     # Удаляем предыдущие webhook
