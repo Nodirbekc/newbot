@@ -363,7 +363,29 @@ def main_menu():
 # ... остальной код вебхуков и Flask ...
 
 # Запуск
-if __name__ == '__main__':
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    return 'OK'
+
+@app.route('/')
+def index():
+    return 'Bot is running with multi-AI system!'
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    # Устанавливаем webhook с правильным URL
+    webhook_url = f"{RENDER_URL}/webhook"
     bot.remove_webhook()
-    bot.set_webhook(url=RENDER_URL + '/' + BOT_TOKEN)
-    app.run(host='0.0.0.0', port=5000)
+    result = bot.set_webhook(url=webhook_url)
+    return f"Webhook set to {webhook_url}: {result}"
+
+if __name__ == '__main__':
+    # Для локального тестирования
+    print("Starting bot...")
+    print(f"Webhook will be set to: {RENDER_URL}/webhook")
+    app.run(host='0.0.0.0', port=5000, debug=True)
