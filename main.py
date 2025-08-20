@@ -15,8 +15,9 @@ GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-if not all([BOT_TOKEN, OWM_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, RENDER_URL]):
-    raise Exception("Не все переменные окружения заданы")
+# Проверяем только обязательные переменные
+if not BOT_TOKEN or not OWM_API_KEY or not RENDER_URL:
+    raise Exception("Не заданы обязательные переменные: BOT_TOKEN, OWM_API, RENDER_EXTERNAL_URL")
 
 bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -61,73 +62,93 @@ user_modes = {}
 def ask_deepseek(prompt: str, history: list = None) -> str:
     """DeepSeek API"""
     if not DEEPSEEK_API_KEY:
-        return "DeepSeek API ключ не настроен"
-    
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    messages = [{"role": "system", "content": "Ты полезный и точный ассистент."}]
-    
-    if history:
-        for msg in history[-6:]:
-            messages.append({"role": "user" if msg.role == "user" else "assistant", "content": msg.text})
-    
-    messages.append({"role": "user", "content": prompt})
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 2000
-    }
+        return ask_gemini(prompt)  # Fallback to Gemini
     
     try:
+        url = "https://api.deepseek.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        messages = [{"role": "system", "content": "Ты полезный и точный ассистент."}]
+        
+        if history:
+            for msg in history[-6:]:
+                role = "user" if msg.role == "user" else "assistant"
+                messages.append({"role": role, "content": msg.text})
+        
+        messages.append({"role": "user", "content": prompt})
+        
+        data = {
+            "model": "deepseek-chat",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2000
+        }
+        
         response = requests.post(url, headers=headers, json=data, timeout=30)
-        return response.json()["choices"][0]["message"]["content"]
+        response_data = response.json()
+        
+        # Безопасное извлечение ответа
+        if response_data.get("choices") and len(response_data["choices"]) > 0:
+            return response_data["choices"][0].get("message", {}).get("content", "Пустой ответ от DeepSeek")
+        else:
+            return ask_gemini(prompt)  # Fallback to Gemini
+            
     except Exception as e:
-        return f"Ошибка DeepSeek: {str(e)}"
+        logging.error(f"DeepSeek error: {e}")
+        return ask_gemini(prompt)  # Fallback to Gemini
 
 def ask_gemini(prompt: str) -> str:
     """Gemini API"""
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
-    
-    data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
+    if not GEMINI_API_KEY:
+        return "❌ API ключ Gemini не настроен. Настрой GOOGLE_API_KEY в переменных окружения."
     
     try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
+        }
+        
+        data = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        
         response = requests.post(url, headers=headers, json=data, timeout=30)
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        response_data = response.json()
+        
+        # Безопасное извлечение ответа Gemini
+        if response_data.get("candidates") and len(response_data["candidates"]) > 0:
+            candidate = response_data["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"]:
+                return candidate["content"]["parts"][0].get("text", "Пустой ответ от Gemini")
+        
+        return "❌ Не удалось получить ответ от Gemini"
+            
     except Exception as e:
-        return f"Ошибка Gemini: {str(e)}"
+        logging.error(f"Gemini error: {e}")
+        return f"⚠️ Ошибка Gemini: {str(e)}"
 
 # ======= Умный роутер =======
 def smart_router(user_id: int, user_query: str) -> tuple:
     if user_id not in user_modes:
         user_modes[user_id] = 'default'
     
-    current_mode = user_modes[user_id]
     query_lower = user_query.lower()
     
-    technical_keywords = ["код", "программир", "алгоритм", "математик", "физик", "наук", "технич"]
-    creative_keywords = ["придумай", "создай", "напиши историю", "креатив", "историю", "стих", "рассказ"]
+    technical_keywords = ["код", "программир", "алгоритм", "математик", "физик", "технич", "логик"]
+    creative_keywords = ["придумай", "создай", "напиши историю", "креатив", "стих", "рассказ", "сценарий"]
     study_keywords = ["учиться", "урок", "задач", "учеб", "объясни", "как решить", "теория"]
-    coding_keywords = ["python", "java", "c++", "функция", "переменн", "баг", "ошибка", "синтаксис"]
     
     if any(keyword in query_lower for keyword in study_keywords):
         user_modes[user_id] = 'study'
         return 'study', 'deepseek'
     
-    if any(keyword in query_lower for keyword in coding_keywords):
+    if any(keyword in query_lower for keyword in technical_keywords):
         user_modes[user_id] = 'coding'
         return 'coding', 'deepseek'
     
@@ -135,74 +156,27 @@ def smart_router(user_id: int, user_query: str) -> tuple:
         user_modes[user_id] = 'creative'
         return 'creative', 'gemini'
     
-    if any(keyword in query_lower for keyword in technical_keywords):
-        return current_mode, 'deepseek'
-    
-    return current_mode, 'deepseek'
+    return user_modes[user_id], 'deepseek'  # По умолчанию DeepSeek
 
 # ======= Специализированные режимы =======
 def study_assistant_mode(query: str, history: list) -> str:
-    prompt = f"""
-    Ты экспертный репетитор. Объясняй максимально понятно.
+    prompt = f"""Ты экспертный репетитор. Объясняй максимально понятно.
     Вопрос: {query}
     
-    Ответь в формате:
-    🎯 ОСНОВНАЯ КОНЦЕПЦИЯ: [1-2 предложения]
-    📚 ПОДРОБНОЕ ОБЪЯСНЕНИЕ: [2-3 абзаца] 
-    🧪 ПРАКТИЧЕСКИЙ ПРИМЕР: [конкретный пример]
-    ⚠️ ЧАСТЫЕ ОШИБКИ: [что избегать]
-    """
+    Ответь кратко и по делу."""
     return ask_deepseek(prompt, history)
 
 def coding_helper_mode(query: str, history: list) -> str:
-    prompt = f"""
-    Ты senior developer с 10+ лет опыта. Давай идеальные решения.
+    prompt = f"""Ты senior developer. Помоги с кодом.
     Запрос: {query}
     
-    Ответь в формате:
-    🔍 АНАЛИЗ ПРОБЛЕМЫ: [в чем суть]
-    💻 РЕШЕНИЕ: [код с комментариями]
-    📖 ОБЪЯСНЕНИЕ: [почему так работает]
-    🚀 АЛЬТЕРНАТИВЫ: [другие подходы]
-    """
+    Ответь с примером кода."""
     return ask_deepseek(prompt, history)
 
 def creative_mode(query: str) -> str:
-    prompt = f"""
-    Ты креативный писатель и художник. Создавай вдохновляющий контент.
-    Запрос: {query}
-    
-    Создай что-то уникальное и engaging!
-    """
+    prompt = f"""Ты креативный писатель. Создай что-то интересное.
+    Запрос: {query}"""
     return ask_gemini(prompt)
-
-# ======= Multi-Agent система =======
-def multi_agent_discussion(user_query: str, history: list) -> str:
-    expert_prompt = f"""
-    Как domain expert с глубокими знаниями, дай развернутый ответ:
-    {user_query}
-    Будь максимально точным и профессиональным.
-    """
-    expert_answer = ask_deepseek(expert_prompt, history)
-    
-    critic_prompt = f"""
-    Проанализируй этот ответ как строгий рецензент:
-    {expert_answer}
-    
-    Найди: 1) Фактические ошибки, 2) Пропущенные важные моменты, 
-    3) Сложные для понимания части, 4) Возможные улучшения
-    """
-    critic_feedback = ask_deepseek(critic_prompt)
-    
-    final_prompt = f"""
-    Синтезируй идеальный ответ из двух perspectives:
-    
-    ЭКСПЕРТ: {expert_answer}
-    КРИТИК: {critic_feedback}
-    
-    Создай финальный ответ который: точен, полон, и понятен.
-    """
-    return ask_deepseek(final_prompt)
 
 def add_to_dialog(user_id: int, role: str, text: str, ai_model: str = None):
     if user_id not in user_dialogs:
@@ -214,15 +188,13 @@ def add_to_dialog(user_id: int, role: str, text: str, ai_model: str = None):
 def process_message(user_id: int, user_query: str) -> str:
     """Основная функция обработки сообщений"""
     
-    # Убедимся что user_dialogs существует для этого пользователя
+    # Инициализация если нужно
     if user_id not in user_dialogs:
         user_dialogs[user_id] = []
-    
-    history = user_dialogs[user_id]
-    
-    # Убедимся что user_modes существует
     if user_id not in user_modes:
         user_modes[user_id] = 'default'
+    
+    history = user_dialogs[user_id]
     
     # Определяем режим и ИИ
     mode, ai_engine = smart_router(user_id, user_query)
@@ -238,9 +210,6 @@ def process_message(user_id: int, user_query: str) -> str:
             response = coding_helper_mode(user_query, history)
         elif mode == 'creative':
             response = creative_mode(user_query)
-        elif "сложн" in user_query.lower() or "обсуди" in user_query.lower():
-            response = multi_agent_discussion(user_query, history)
-            ai_engine = "multi-agent"
         else:
             # Default processing
             if ai_engine == 'deepseek':
@@ -276,23 +245,12 @@ def handle_weather_request(message):
         desc = data["weather"][0]["description"].capitalize()
         humidity = data["main"]["humidity"]
         wind = data["wind"]["speed"]
-        sunrise = datetime.utcfromtimestamp(data["sys"]["sunrise"]).strftime('%H:%M')
-        sunset = datetime.utcfromtimestamp(data["sys"]["sunset"]).strftime('%H:%M')
-
-        emoji = "🙂"
-        if temp <= 0:
-            emoji = "🥶"
-        elif temp >= 30:
-            emoji = "🥵"
 
         msg = (
             f"Погода в {city} сейчас:\n"
-            f"{emoji} {desc}\n"
-            f"🌡 Температура: {temp}°C\n"
+            f"🌡 {desc}, {temp}°C\n"
             f"💧 Влажность: {humidity}%\n"
-            f"🌬 Ветер: {wind} м/с\n"
-            f"🌅 Восход: {sunrise}\n"
-            f"🌇 Закат: {sunset}"
+            f"🌬 Ветер: {wind} м/с"
         )
         
         bot.send_message(chat_id, msg)
@@ -310,38 +268,33 @@ def start_handler(message):
     user_modes[user_id] = "default"
     if user_id not in user_dialogs:
         user_dialogs[user_id] = []
-    bot.send_message(user_id, "🤖 Привет! Я умный помощник с ИИ!", reply_markup=main_menu())
+    
+    bot.send_message(user_id, 
+                    "🤖 Привет! Я умный помощник с ИИ!\n"
+                    "• 🌤 Погода - узнай погоду\n"
+                    "• 🤖 ИИ - задай вопрос\n"
+                    "• /study - режим учебы\n"
+                    "• /code - режим программирования\n"
+                    "• /creative - креативный режим", 
+                    reply_markup=main_menu())
 
-@bot.message_handler(commands=["mode_study", "study"])
+@bot.message_handler(commands=["study", "mode_study"])
 def set_study_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "study"
     bot.send_message(user_id, "🎓 Режим репетитора активирован! Задавай учебные вопросы.")
 
-@bot.message_handler(commands=["mode_code", "code"])
+@bot.message_handler(commands=["code", "mode_code"])
 def set_code_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "coding"
     bot.send_message(user_id, "💻 Режим программирования активирован! Задавай технические вопросы.")
 
-@bot.message_handler(commands=["mode_creative", "creative"])
+@bot.message_handler(commands=["creative", "mode_creative"])
 def set_creative_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "creative"
     bot.send_message(user_id, "🎨 Креативный режим активирован! Давай творить!")
-
-@bot.message_handler(commands=["multi_ai", "multi"])
-def multi_ai_mode(message):
-    user_id = message.chat.id
-    bot.send_message(user_id, "🧠 Multi-Agent режим! Несколько ИИ будут обсуждать твой вопрос.")
-
-@bot.message_handler(commands=["clear", "reset"])
-def clear_history(message):
-    user_id = message.chat.id
-    if user_id in user_dialogs:
-        user_dialogs[user_id] = []
-    save_dialogs()
-    bot.send_message(user_id, "🗑️ История диалога очищена!")
 
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
 def ask_city(message):
@@ -388,7 +341,7 @@ def handle_all_messages(message):
         bot.send_message(user_id, f"{response}{ai_info}")
         
     except Exception as e:
-        bot.send_message(user_id, f"⚠️ Критическая ошибка: {str(e)}")
+        bot.send_message(user_id, f"⚠️ Ошибка: {str(e)}")
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
