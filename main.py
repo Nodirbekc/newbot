@@ -11,10 +11,11 @@ import re
 # Настройки
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWM_API_KEY = os.environ.get("OWM_API")
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-if not BOT_TOKEN or not OWM_API_KEY or not RENDER_URL:
-    raise Exception("Не заданы обязательные переменные: BOT_TOKEN, OWM_API, RENDER_EXTERNAL_URL")
+if not all([BOT_TOKEN, OWM_API_KEY, GEMINI_API_KEY, RENDER_URL]):
+    raise Exception("Не заданы обязательные переменные окружения")
 
 bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -26,10 +27,11 @@ HISTORY_FILE = "user_dialogs.pkl"
 
 # Структура для хранения сообщений
 class DialogMessage:
-    def __init__(self, role: str, text: str):
+    def __init__(self, role: str, text: str, ai_model: str = "gemini"):
         self.role = role
         self.text = text
         self.timestamp = datetime.now()
+        self.ai_model = ai_model
 
 # Загрузка и сохранение истории
 def load_dialogs():
@@ -53,62 +55,40 @@ user_dialogs = load_dialogs()
 user_states = {}
 user_modes = {}
 
-# ======= БЕСПЛАТНЫЙ ИИ API =======
-def ask_ai(prompt: str) -> str:
-    """Бесплатный ИИ через OpenAI-совместимый API"""
+# ======= GEMINI API =======
+def ask_gemini(prompt: str) -> str:
+    """Gemini API - надежный и проверенный"""
     try:
-        # Попробуем несколько бесплатных альтернатив
-        return ask_openrouter(prompt)  # Основной вариант
-        
-    except Exception as e:
-        logging.error(f"AI error: {e}")
-        return "🤖 ИИ временно недоступен. Попробуй позже."
-
-def ask_openrouter(prompt: str) -> str:
-    """OpenRouter - бесплатные модели"""
-    try:
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer free"  # Бесплатный ключ
-        }
+        # НОВЫЙ правильный endpoint для Gemini
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
         
         data = {
-            "model": "google/gemini-pro",  # Бесплатная модель
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1000
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=15)
+        response = requests.post(url, json=data, timeout=30)
         
-        if response.status_code == 200:
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-        else:
-            return ask_fallback(prompt)
+        if response.status_code != 200:
+            return f"❌ Ошибка Gemini API: {response.status_code}"
+        
+        response_data = response.json()
+        
+        # Правильное извлечение ответа
+        if (response_data.get("candidates") and 
+            len(response_data["candidates"]) > 0 and
+            "content" in response_data["candidates"][0] and
+            "parts" in response_data["candidates"][0]["content"] and
+            len(response_data["candidates"][0]["content"]["parts"]) > 0):
             
-    except:
-        return ask_fallback(prompt)
-
-def ask_fallback(prompt: str) -> str:
-    """Резервный вариант - локальная логика"""
-    prompt_lower = prompt.lower()
-    
-    # Простые ответы на частые вопросы
-    if any(word in prompt_lower for word in ["привет", "hello", "hi", "здравств"]):
-        return "Привет! Чем могу помочь? 😊"
-    
-    elif any(word in prompt_lower for word in ["как дела", "how are you"]):
-        return "У меня все отлично! Готов помочь тебе! 🚀"
-    
-    elif any(word in prompt_lower for word in ["спасибо", "thanks", "thank you"]):
-        return "Всегда рад помочь! Обращайся еще! 👍"
-    
-    elif any(word in prompt_lower for word in ["погода", "weather"]):
-        return "Используй кнопку '🌤 Погода' для информации о погоде!"
-    
-    # Для остального - заглушка
-    return "🤖 Извини, ИИ сервис временно недоступен. Но ты можешь спросить о погоде или попробовать позже!"
+            return response_data["candidates"][0]["content"]["parts"][0].get("text", "Пустой ответ от Gemini")
+        
+        return "❌ Не удалось обработать ответ Gemini"
+            
+    except Exception as e:
+        logging.error(f"Gemini error: {e}")
+        return f"⚠️ Ошибка Gemini: {str(e)}"
 
 # ======= Умный роутер =======
 def smart_router(user_id: int, user_query: str) -> str:
@@ -117,8 +97,8 @@ def smart_router(user_id: int, user_query: str) -> str:
     
     query_lower = user_query.lower()
     
-    study_keywords = ["учиться", "урок", "задач", "учеб", "объясни", "как решить", "теория"]
-    coding_keywords = ["код", "программир", "алгоритм", "python", "java", "функция"]
+    study_keywords = ["учиться", "урок", "задач", "учеб", "объясни", "как решить", "теория", "математик", "физик"]
+    coding_keywords = ["код", "программир", "алгоритм", "python", "java", "функция", "баг", "ошибка"]
     creative_keywords = ["придумай", "создай", "напиши историю", "креатив", "стих", "рассказ"]
     
     if any(keyword in query_lower for keyword in study_keywords):
@@ -132,25 +112,33 @@ def smart_router(user_id: int, user_query: str) -> str:
 
 # ======= Специализированные режимы =======
 def study_assistant_mode(query: str) -> str:
-    prompt = f"""Ты экспертный репетитор. Объясни понятно:
-    {query}
+    prompt = f"""Ты экспертный репетитор с PhD уровнем знаний. Объясняй максимально понятно.
+    Вопрос: {query}
     
-    Ответь кратко и информативно."""
-    return ask_ai(prompt)
+    Ответь в формате:
+    🎯 ОСНОВНАЯ КОНЦЕПЦИЯ: [1-2 предложения]
+    📚 ПОДРОБНОЕ ОБЪЯСНЕНИЕ: [2-3 абзаца] 
+    🧪 ПРАКТИЧЕСКИЙ ПРИМЕР: [конкретный пример]
+    ⚠️ ЧАСТЫЕ ОШИБКИ: [что избегать]"""
+    return ask_gemini(prompt)
 
 def coding_helper_mode(query: str) -> str:
-    prompt = f"""Ты senior developer. Помоги с кодом:
-    {query}
+    prompt = f"""Ты senior developer с 10+ лет опыта. Давай идеальные решения.
+    Запрос: {query}
     
-    Ответь с примером и объяснением."""
-    return ask_ai(prompt)
+    Ответь в формате:
+    🔍 АНАЛИЗ ПРОБЛЕМЫ: [в чем суть]
+    💻 РЕШЕНИЕ: [код с комментариями]
+    📖 ОБЪЯСНЕНИЕ: [почему так работает]
+    🚀 АЛЬТЕРНАТИВЫ: [другие подходы]"""
+    return ask_gemini(prompt)
 
 def creative_mode(query: str) -> str:
-    prompt = f"""Ты креативный писатель. Создай:
-    {query}
+    prompt = f"""Ты креативный писатель и художник. Создавай вдохновляющий контент.
+    Запрос: {query}
     
-    Будь креативным!"""
-    return ask_ai(prompt)
+    Создай что-то уникальное и engaging!"""
+    return ask_gemini(prompt)
 
 def add_to_dialog(user_id: int, role: str, text: str):
     if user_id not in user_dialogs:
@@ -182,7 +170,7 @@ def process_message(user_id: int, user_query: str) -> str:
         elif mode == 'creative':
             response = creative_mode(user_query)
         else:
-            response = ask_ai(user_query)
+            response = ask_gemini(user_query)
         
         # Сохраняем ответ
         add_to_dialog(user_id, "assistant", response)
@@ -238,29 +226,32 @@ def start_handler(message):
         user_dialogs[user_id] = []
     
     bot.send_message(user_id, 
-                    "🤖 Привет! Я умный помощник!\n"
+                    "🤖 Привет! Я умный помощник на Gemini AI!\n"
                     "• 🌤 Погода - узнай погоду\n"
-                    "• 🤖 ИИ - задай вопрос\n"
-                    "Работаю на бесплатных технологиях! 🚀", 
+                    "• 🤖 ИИ - задай любой вопрос\n"
+                    "• /study - режим учебы\n"
+                    "• /code - режим программирования\n"
+                    "• /creative - креативный режим\n\n"
+                    "🔥 Работаю на Gemini - самом надежном ИИ!", 
                     reply_markup=main_menu())
 
 @bot.message_handler(commands=["study"])
 def set_study_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "study"
-    bot.send_message(user_id, "🎓 Режим репетитора активирован!")
+    bot.send_message(user_id, "🎓 Режим репетитора активирован! Задавай учебные вопросы.")
 
 @bot.message_handler(commands=["code"])
 def set_code_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "coding"
-    bot.send_message(user_id, "💻 Режим программирования активирован!")
+    bot.send_message(user_id, "💻 Режим программирования активирован! Задавай технические вопросы.")
 
 @bot.message_handler(commands=["creative"])
 def set_creative_mode(message):
     user_id = message.chat.id
     user_modes[user_id] = "creative"
-    bot.send_message(user_id, "🎨 Креативный режим активирован!")
+    bot.send_message(user_id, "🎨 Креативный режим активирован! Давай творить!")
 
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
 def ask_city(message):
@@ -320,7 +311,7 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is running with free AI!'
+    return 'Bot is running with Gemini AI!'
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
