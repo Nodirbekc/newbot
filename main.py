@@ -3,9 +3,8 @@ import logging
 import requests
 from flask import Flask, request
 from telebot import TeleBot, types
-from datetime import datetime
 
-# ====== ENV ======
+# ===== ENV =====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OWM_API_KEY = os.getenv("OWM_API_KEY")
@@ -14,198 +13,148 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 if not TELEGRAM_BOT_TOKEN or not GOOGLE_API_KEY or not RENDER_EXTERNAL_URL:
     raise Exception("Missing required environment variables")
 
-# ====== TELEGRAM ======
+# ===== TELEGRAM =====
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ====== GEMINI (НОВЫЙ SDK) ======
-from google import genai
-client = genai.Client(api_key=GOOGLE_API_KEY)
+# ===== GEMINI (ПРАВИЛЬНО) =====
+import google.genai as genai
 
-GEMINI_MODEL = "gemini-1.5-flash-latest"
+genai.configure(api_key=GOOGLE_API_KEY)
+MODEL_NAME = "gemini-1.5-flash-latest"
 
 def ask_gemini(prompt: str) -> str:
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt
-        )
+        model = genai.GenerativeModel(MODEL_NAME)
+        response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        logging.error(f"Gemini error: {e}")
+        logging.error(e)
         return f"❌ Gemini error: {e}"
 
-# ====== USER STATES ======
-user_modes = {}     # default / study / code / creative
-user_states = {}    # waiting_city / normal
+# ===== STATES =====
+user_modes = {}
+user_states = {}
 
-# ====== SMART ROUTER ======
-def route_mode(user_id: int, text: str):
+# ===== ROUTER =====
+def route_mode(uid, text):
     text = text.lower()
-    if user_id not in user_modes:
-        user_modes[user_id] = "default"
+    if uid not in user_modes:
+        user_modes[uid] = "default"
 
-    if any(k in text for k in ["мат", "физ", "задач", "объясни", "теория"]):
-        user_modes[user_id] = "study"
-    elif any(k in text for k in ["код", "python", "ошибка", "функц", "алгоритм"]):
-        user_modes[user_id] = "code"
-    elif any(k in text for k in ["стих", "история", "придумай", "креатив"]):
-        user_modes[user_id] = "creative"
+    if any(k in text for k in ["мат", "физ", "задач", "объясни"]):
+        user_modes[uid] = "study"
+    elif any(k in text for k in ["код", "python", "ошибка", "алгоритм"]):
+        user_modes[uid] = "code"
+    elif any(k in text for k in ["стих", "придумай", "креатив"]):
+        user_modes[uid] = "creative"
 
-    return user_modes[user_id]
+    return user_modes[uid]
 
-# ====== MODES ======
-def study_mode(q: str):
-    prompt = f"""
-Ты профессиональный преподаватель.
-Объясняй чётко и по шагам.
+# ===== MODES =====
+def study_mode(q):
+    return ask_gemini(
+        f"Ты преподаватель. Объясни по шагам:\n{q}"
+    )
 
-Формат:
-🎯 КОНЦЕПЦИЯ
-📘 ОБЪЯСНЕНИЕ
-🧪 ПРИМЕР
-⚠️ ОШИБКИ
+def code_mode(q):
+    return ask_gemini(
+        f"Ты senior developer. Дай решение с кодом:\n{q}"
+    )
 
-Вопрос: {q}
-"""
-    return ask_gemini(prompt)
+def creative_mode(q):
+    return ask_gemini(
+        f"Создай креативный текст:\n{q}"
+    )
 
-def code_mode(q: str):
-    prompt = f"""
-Ты senior developer.
-Дай корректное решение.
-
-Формат:
-🔍 АНАЛИЗ
-💻 КОД
-📖 ПОЯСНЕНИЕ
-
-Запрос: {q}
-"""
-    return ask_gemini(prompt)
-
-def creative_mode(q: str):
-    return ask_gemini(f"Создай креативный и оригинальный текст:\n{q}")
-
-# ====== WEATHER ======
-def get_weather(city: str) -> str:
+# ===== WEATHER =====
+def get_weather(city):
     if not OWM_API_KEY:
         return "❌ OpenWeather API key не задан"
 
-    url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {
-        "q": city,
-        "appid": OWM_API_KEY,
-        "units": "metric",
-        "lang": "ru"
-    }
-
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(
+        "https://api.openweathermap.org/data/2.5/weather",
+        params={
+            "q": city,
+            "appid": OWM_API_KEY,
+            "units": "metric",
+            "lang": "ru"
+        },
+        timeout=10
+    )
     data = r.json()
 
     if data.get("cod") != 200:
-        return f"❌ Город '{city}' не найден"
+        return "❌ Город не найден"
 
     return (
-        f"🌤 Погода в {city}\n"
+        f"🌤 {city}\n"
         f"🌡 {data['main']['temp']}°C\n"
-        f"☁ {data['weather'][0]['description']}\n"
-        f"💧 Влажность: {data['main']['humidity']}%\n"
-        f"🌬 Ветер: {data['wind']['speed']} м/с"
+        f"{data['weather'][0]['description']}"
     )
 
-# ====== UI ======
-def main_menu():
+# ===== UI =====
+def menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🌤 Погода", "🤖 ИИ")
     kb.add("/study", "/code", "/creative")
     return kb
 
-# ====== HANDLERS ======
+# ===== HANDLERS =====
 @bot.message_handler(commands=["start"])
-def start(message):
-    user_id = message.chat.id
-    user_modes[user_id] = "default"
-    user_states[user_id] = "normal"
-
-    bot.send_message(
-        user_id,
-        "🤖 Gemini AI Bot\n\n"
-        "• 🌤 Погода\n"
-        "• 🤖 ИИ\n"
-        "• /study — учеба\n"
-        "• /code — программирование\n"
-        "• /creative — креатив\n",
-        reply_markup=main_menu()
-    )
-
-@bot.message_handler(commands=["study"])
-def set_study(message):
-    user_modes[message.chat.id] = "study"
-    bot.send_message(message.chat.id, "🎓 Режим УЧЁБА включён")
-
-@bot.message_handler(commands=["code"])
-def set_code(message):
-    user_modes[message.chat.id] = "code"
-    bot.send_message(message.chat.id, "💻 Режим КОД включён")
-
-@bot.message_handler(commands=["creative"])
-def set_creative(message):
-    user_modes[message.chat.id] = "creative"
-    bot.send_message(message.chat.id, "🎨 КРЕАТИВНЫЙ режим включён")
+def start(m):
+    user_modes[m.chat.id] = "default"
+    user_states[m.chat.id] = "normal"
+    bot.send_message(m.chat.id, "Gemini AI Bot", reply_markup=menu())
 
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
-def ask_city(message):
-    user_states[message.chat.id] = "waiting_city"
-    bot.send_message(message.chat.id, "Введи город:")
-
-@bot.message_handler(func=lambda m: m.text == "🤖 ИИ")
-def ai_prompt(message):
-    bot.send_message(message.chat.id, "Задай вопрос:")
+def ask_city(m):
+    user_states[m.chat.id] = "city"
+    bot.send_message(m.chat.id, "Введи город:")
 
 @bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    user_id = message.chat.id
-    text = message.text
+def handle(m):
+    uid = m.chat.id
+    text = m.text
 
-    if user_states.get(user_id) == "waiting_city":
-        user_states[user_id] = "normal"
-        bot.send_message(user_id, get_weather(text))
+    if user_states.get(uid) == "city":
+        user_states[uid] = "normal"
+        bot.send_message(uid, get_weather(text))
         return
 
-    mode = route_mode(user_id, text)
+    mode = route_mode(uid, text)
 
     if mode == "study":
-        answer = study_mode(text)
+        ans = study_mode(text)
     elif mode == "code":
-        answer = code_mode(text)
+        ans = code_mode(text)
     elif mode == "creative":
-        answer = creative_mode(text)
+        ans = creative_mode(text)
     else:
-        answer = ask_gemini(text)
+        ans = ask_gemini(text)
 
-    bot.send_message(user_id, answer[:4000])
+    bot.send_message(uid, ans[:4000])
 
-# ====== WEBHOOK ======
+# ===== WEBHOOK =====
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def webhook():
-    update = types.Update.de_json(request.get_data().decode("utf-8"))
+    update = types.Update.de_json(request.data.decode("utf-8"))
     bot.process_new_updates([update])
     return "OK"
-
-@app.route("/")
-def index():
-    return "Bot is running"
 
 @app.route("/set_webhook")
 def set_webhook():
     bot.remove_webhook()
     url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_BOT_TOKEN}"
-    bot.set_webhook(url=url)
+    bot.set_webhook(url)
     return f"Webhook set: {url}"
 
-# ====== START ======
+@app.route("/")
+def index():
+    return "Bot is running"
+
+# ===== START =====
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
