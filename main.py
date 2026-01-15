@@ -1,43 +1,58 @@
 ﻿import os
-import logging
 import requests
+import logging
 from flask import Flask, request
 from telebot import TeleBot, types
 
-# ===== ENV =====
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# ================= ENV =================
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OWM_API_KEY = os.getenv("OWM_API_KEY")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-if not TELEGRAM_BOT_TOKEN or not GOOGLE_API_KEY or not RENDER_EXTERNAL_URL:
+if not BOT_TOKEN or not GOOGLE_API_KEY or not RENDER_EXTERNAL_URL:
     raise Exception("Missing required environment variables")
 
-# ===== TELEGRAM =====
-bot = TeleBot(TELEGRAM_BOT_TOKEN)
+# ================= APP =================
+bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ===== GEMINI (ПРАВИЛЬНО) =====
-import google.genai as genai
-
-genai.configure(api_key=GOOGLE_API_KEY)
-MODEL_NAME = "gemini-1.5-flash-latest"
+# ================= GEMINI (HTTP, БЕЗ SDK) =================
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1/models/"
+    "gemini-1.5-flash-latest:generateContent"
+)
 
 def ask_gemini(prompt: str) -> str:
     try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+
+        r = requests.post(
+            f"{GEMINI_URL}?key={GOOGLE_API_KEY}",
+            json=payload,
+            timeout=30
+        )
+
+        if r.status_code != 200:
+            return f"❌ Gemini HTTP {r.status_code}: {r.text}"
+
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
     except Exception as e:
         logging.error(e)
         return f"❌ Gemini error: {e}"
 
-# ===== STATES =====
+# ================= STATES =================
 user_modes = {}
 user_states = {}
 
-# ===== ROUTER =====
+# ================= ROUTER =================
 def route_mode(uid, text):
     text = text.lower()
     if uid not in user_modes:
@@ -52,7 +67,7 @@ def route_mode(uid, text):
 
     return user_modes[uid]
 
-# ===== MODES =====
+# ================= MODES =================
 def study_mode(q):
     return ask_gemini(
         f"Ты преподаватель. Объясни по шагам:\n{q}"
@@ -60,7 +75,7 @@ def study_mode(q):
 
 def code_mode(q):
     return ask_gemini(
-        f"Ты senior developer. Дай решение с кодом:\n{q}"
+        f"Ты senior developer. Дай код и объяснение:\n{q}"
     )
 
 def creative_mode(q):
@@ -68,7 +83,7 @@ def creative_mode(q):
         f"Создай креативный текст:\n{q}"
     )
 
-# ===== WEATHER =====
+# ================= WEATHER =================
 def get_weather(city):
     if not OWM_API_KEY:
         return "❌ OpenWeather API key не задан"
@@ -83,8 +98,8 @@ def get_weather(city):
         },
         timeout=10
     )
-    data = r.json()
 
+    data = r.json()
     if data.get("cod") != 200:
         return "❌ Город не найден"
 
@@ -94,14 +109,14 @@ def get_weather(city):
         f"{data['weather'][0]['description']}"
     )
 
-# ===== UI =====
+# ================= UI =================
 def menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🌤 Погода", "🤖 ИИ")
     kb.add("/study", "/code", "/creative")
     return kb
 
-# ===== HANDLERS =====
+# ================= HANDLERS =================
 @bot.message_handler(commands=["start"])
 def start(m):
     user_modes[m.chat.id] = "default"
@@ -136,8 +151,8 @@ def handle(m):
 
     bot.send_message(uid, ans[:4000])
 
-# ===== WEBHOOK =====
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+# ================= WEBHOOK =================
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = types.Update.de_json(request.data.decode("utf-8"))
     bot.process_new_updates([update])
@@ -146,7 +161,7 @@ def webhook():
 @app.route("/set_webhook")
 def set_webhook():
     bot.remove_webhook()
-    url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_BOT_TOKEN}"
+    url = f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}"
     bot.set_webhook(url)
     return f"Webhook set: {url}"
 
@@ -154,7 +169,7 @@ def set_webhook():
 def index():
     return "Bot is running"
 
-# ===== START =====
+# ================= START =================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
