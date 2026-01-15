@@ -1,92 +1,33 @@
 ﻿import os
 import requests
-import logging
 from flask import Flask, request
 from telebot import TeleBot, types
 
-# ================= ENV =================
+# ===== ENV =====
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OWM_API_KEY = os.getenv("OWM_API_KEY")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-if not BOT_TOKEN or not GOOGLE_API_KEY or not RENDER_EXTERNAL_URL:
-    raise Exception("Missing required environment variables")
+if not BOT_TOKEN:
+    raise Exception("Missing TELEGRAM_BOT_TOKEN")
 
-# ================= APP =================
 bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-# ================= GEMINI (HTTP, БЕЗ SDK) =================
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1/models/"
-    "gemini-1.5-flash-latest:generateContent"
-)
-
-def ask_gemini(prompt: str) -> str:
-    try:
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
-
-        r = requests.post(
-            f"{GEMINI_URL}?key={GOOGLE_API_KEY}",
-            json=payload,
-            timeout=30
-        )
-
-        if r.status_code != 200:
-            return f"❌ Gemini HTTP {r.status_code}: {r.text}"
-
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-
-    except Exception as e:
-        logging.error(e)
-        return f"❌ Gemini error: {e}"
-
-# ================= STATES =================
-user_modes = {}
+# ===== STATES =====
 user_states = {}
+user_modes = {}
 
-# ================= ROUTER =================
-def route_mode(uid, text):
-    text = text.lower()
-    if uid not in user_modes:
-        user_modes[uid] = "default"
+# ===== UI =====
+def menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🌤 Погода", "🤖 ИИ")
+    kb.add("/study", "/code", "/creative")
+    return kb
 
-    if any(k in text for k in ["мат", "физ", "задач", "объясни"]):
-        user_modes[uid] = "study"
-    elif any(k in text for k in ["код", "python", "ошибка", "алгоритм"]):
-        user_modes[uid] = "code"
-    elif any(k in text for k in ["стих", "придумай", "креатив"]):
-        user_modes[uid] = "creative"
-
-    return user_modes[uid]
-
-# ================= MODES =================
-def study_mode(q):
-    return ask_gemini(
-        f"Ты преподаватель. Объясни по шагам:\n{q}"
-    )
-
-def code_mode(q):
-    return ask_gemini(
-        f"Ты senior developer. Дай код и объяснение:\n{q}"
-    )
-
-def creative_mode(q):
-    return ask_gemini(
-        f"Создай креативный текст:\n{q}"
-    )
-
-# ================= WEATHER =================
+# ===== WEATHER =====
 def get_weather(city):
     if not OWM_API_KEY:
-        return "❌ OpenWeather API key не задан"
+        return "❌ Ключ OpenWeather не задан"
 
     r = requests.get(
         "https://api.openweathermap.org/data/2.5/weather",
@@ -104,30 +45,59 @@ def get_weather(city):
         return "❌ Город не найден"
 
     return (
-        f"🌤 {city}\n"
+        f"🌤 Погода в {city}\n"
         f"🌡 {data['main']['temp']}°C\n"
-        f"{data['weather'][0]['description']}"
+        f"{data['weather'][0]['description']}\n"
+        f"💧 Влажность: {data['main']['humidity']}%\n"
+        f"🌬 Ветер: {data['wind']['speed']} м/с"
     )
 
-# ================= UI =================
-def menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🌤 Погода", "🤖 ИИ")
-    kb.add("/study", "/code", "/creative")
-    return kb
-
-# ================= HANDLERS =================
+# ===== COMMANDS =====
 @bot.message_handler(commands=["start"])
 def start(m):
     user_modes[m.chat.id] = "default"
     user_states[m.chat.id] = "normal"
-    bot.send_message(m.chat.id, "Gemini AI Bot", reply_markup=menu())
+    bot.send_message(
+        m.chat.id,
+        "🤖 Учебный бот\n\n"
+        "• 🌤 Погода\n"
+        "• 🤖 ИИ (демо)\n"
+        "• /study — учеба\n"
+        "• /code — программирование\n"
+        "• /creative — креатив\n",
+        reply_markup=menu()
+    )
 
+@bot.message_handler(commands=["study"])
+def study(m):
+    user_modes[m.chat.id] = "study"
+    bot.send_message(m.chat.id, "🎓 Режим УЧЁБА включён")
+
+@bot.message_handler(commands=["code"])
+def code(m):
+    user_modes[m.chat.id] = "code"
+    bot.send_message(m.chat.id, "💻 Режим КОД включён")
+
+@bot.message_handler(commands=["creative"])
+def creative(m):
+    user_modes[m.chat.id] = "creative"
+    bot.send_message(m.chat.id, "🎨 Режим КРЕАТИВ включён")
+
+# ===== BUTTONS =====
 @bot.message_handler(func=lambda m: m.text == "🌤 Погода")
 def ask_city(m):
     user_states[m.chat.id] = "city"
     bot.send_message(m.chat.id, "Введи город:")
 
+@bot.message_handler(func=lambda m: m.text == "🤖 ИИ")
+def fake_ai(m):
+    bot.send_message(
+        m.chat.id,
+        "🤖 ИИ временно недоступен.\n"
+        "Функция в разработке."
+    )
+
+# ===== TEXT HANDLER =====
 @bot.message_handler(func=lambda m: True)
 def handle(m):
     uid = m.chat.id
@@ -138,38 +108,29 @@ def handle(m):
         bot.send_message(uid, get_weather(text))
         return
 
-    mode = route_mode(uid, text)
+    mode = user_modes.get(uid, "default")
 
     if mode == "study":
-        ans = study_mode(text)
+        bot.send_message(uid, "📘 Учебный режим активен.\nФункция будет добавлена позже.")
     elif mode == "code":
-        ans = code_mode(text)
+        bot.send_message(uid, "💻 Режим программирования.\nФункция будет добавлена позже.")
     elif mode == "creative":
-        ans = creative_mode(text)
+        bot.send_message(uid, "🎨 Креативный режим.\nФункция будет добавлена позже.")
     else:
-        ans = ask_gemini(text)
+        bot.send_message(uid, "ℹ Используй меню или команды.")
 
-    bot.send_message(uid, ans[:4000])
+# ===== WEB SERVER (для Render) =====
+@app.route("/")
+def index():
+    return "Bot is running"
 
-# ================= WEBHOOK =================
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = types.Update.de_json(request.data.decode("utf-8"))
     bot.process_new_updates([update])
     return "OK"
 
-@app.route("/set_webhook")
-def set_webhook():
-    bot.remove_webhook()
-    url = f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}"
-    bot.set_webhook(url)
-    return f"Webhook set: {url}"
-
-@app.route("/")
-def index():
-    return "Bot is running"
-
-# ================= START =================
+# ===== START =====
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
